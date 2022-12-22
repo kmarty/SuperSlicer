@@ -147,7 +147,7 @@ public:
         m_action_font = m_constant_text.credits_font.Bold();
 
         // draw logo and constant info text
-        Decorate(m_main_bitmap);
+        Decorate();
     }
 
     void SetText(const wxString& text)
@@ -160,7 +160,7 @@ public:
             memDC.SelectObject(bitmap);
 
             memDC.SetFont(m_action_font);
-///            memDC.SetTextForeground(wxColour(237, 107, 33)); // ed6b21
+            ///            memDC.SetTextForeground(wxColour(237, 107, 33)); // ed6b21
             uint32_t color = Slic3r::GUI::wxGetApp().app_config->create_color(0.86f, 0.93f);
             memDC.SetTextForeground(wxColour(color & 0xFF, (color & 0xFF00) >> 8, (color & 0xFF0000) >> 16));
             memDC.DrawText(text, int(m_scale * 60), m_action_line_y_position);
@@ -201,14 +201,14 @@ public:
         return new_bmp;
     }
 
-    void Decorate(wxBitmap& bmp)
+    void Decorate()
     {
-        if (!bmp.IsOk())
+        if (!m_main_bitmap.IsOk())
             return;
 
         // draw text to the box at the left of the splashscreen.
         // this box will be 2/5 of the weight of the bitmap, and be at the left.
-        int width = lround(bmp.GetWidth() * 0.4);
+        int width = lround(m_main_bitmap.GetWidth() * 0.4);
 
         // load bitmap for logo
         BitmapCache bmp_cache;
@@ -218,11 +218,11 @@ public:
 
         wxCoord margin = int(m_scale * 20);
 
-        wxRect banner_rect(wxPoint(0, logo_size), wxPoint(width, bmp.GetHeight()));
+        wxRect banner_rect(wxPoint(0, logo_size), wxPoint(width, m_main_bitmap.GetHeight()));
         banner_rect.Deflate(margin, 2 * margin);
 
         // use a memory DC to draw directly onto the bitmap
-        wxMemoryDC memDc(bmp);
+        wxMemoryDC memDc(m_main_bitmap);
 
         // draw logo
         memDc.DrawBitmap(*logo_bmp, margin, margin, true);
@@ -251,7 +251,7 @@ public:
 
         // calculate position for the dynamic text
         int logo_and_header_height = margin + logo_size + title_height + version_height;
-        m_action_line_y_position = logo_and_header_height + 0.5 * (bmp.GetHeight() - margin - credits_height - logo_and_header_height - text_height);
+        m_action_line_y_position = logo_and_header_height + 0.5 * (m_main_bitmap.GetHeight() - margin - credits_height - logo_and_header_height - text_height);
     }
 
 private:
@@ -1180,20 +1180,23 @@ bool GUI_App::on_init_inner()
         std::string file_name = app_config->splashscreen(is_editor());
         wxString artist;
         if (!file_name.empty()) {
-            wxString splash_screen_path = wxString::FromUTF8((boost::filesystem::path(Slic3r::resources_dir()) / "splashscreen" / file_name).string().c_str());
-        // make a bitmap with dark grey banner on the left side
-            bmp = SplashScreen::MakeBitmap(wxBitmap(splash_screen_path, wxBITMAP_TYPE_JPEG));
+            boost::filesystem::path splash_screen_path = (boost::filesystem::path(Slic3r::resources_dir()) / "splashscreen" / file_name);
+            if (boost::filesystem::exists(splash_screen_path)) {
+                wxString path_str = wxString::FromUTF8((splash_screen_path).string().c_str());
+                // make a bitmap with dark grey banner on the left side
+                bmp = SplashScreen::MakeBitmap(wxBitmap(path_str, wxBITMAP_TYPE_JPEG));
 
-
-            int result;
-            void** ifdArray = nullptr;
-            ExifTagNodeInfo* tag;
-            ifdArray = exif_createIfdTableArray(splash_screen_path.c_str(), &result);
-            if (result > 0 && ifdArray) {
-                tag = exif_getTagInfo(ifdArray, IFD_0TH, TAG_Artist);
-                if (tag) {
-                    if (!tag->error) {
-                        artist = (_L("Artwork model by") + " " + wxString::FromUTF8((char*)tag->byteData));
+                //get the artist name from metadata
+                int result;
+                void** ifdArray = nullptr;
+                ExifTagNodeInfo* tag;
+                ifdArray = exif_createIfdTableArray(path_str.c_str(), &result);
+                if (result > 0 && ifdArray) {
+                    tag = exif_getTagInfo(ifdArray, IFD_0TH, TAG_Artist);
+                    if (tag) {
+                        if (!tag->error) {
+                            artist = (_L("Artwork model by") + " " + wxString::FromUTF8((char*)tag->byteData));
+                        }
                     }
                 }
             }
@@ -1216,18 +1219,18 @@ bool GUI_App::on_init_inner()
             get_app_config()->save();
         }
 
-        // create splash screen with updated bmp
-        scrn = new SplashScreen(bmp.IsOk() ? bmp : create_scaled_bitmap(SLIC3R_APP_KEY, nullptr, 400), 
-                                wxSPLASH_CENTRE_ON_SCREEN | wxSPLASH_TIMEOUT, 4000, splashscreen_pos, artist);
+        // make a bitmap with dark grey banner on the left side
+        scrn = new SplashScreen(bmp.IsOk() ? bmp : SplashScreen::MakeBitmap(create_scaled_bitmap(SLIC3R_APP_KEY, nullptr, 600)),
+                wxSPLASH_CENTRE_ON_SCREEN | wxSPLASH_TIMEOUT, 4000, splashscreen_pos, artist);
 
-        if (!default_splashscreen_pos)
-            // revert "restore_win_position" value if application wasn't crashed
-            get_app_config()->set("restore_win_position", "1");
+            if (!default_splashscreen_pos)
+                // revert "restore_win_position" value if application wasn't crashed
+                get_app_config()->set("restore_win_position", "1");
 #ifndef __linux__
-        wxYield();
+            wxYield();
 #endif
-        scrn->SetText(_L("Loading configuration")+ dots);
-    }
+            scrn->SetText(_L("Loading configuration") + dots);
+        }
 
     preset_bundle = new PresetBundle();
 
@@ -1259,7 +1262,7 @@ bool GUI_App::on_init_inner()
                         , NotificationManager::NotificationLevel::ImportantNotificationLevel
                         , Slic3r::format(_u8L("New release version %1% is available."), evt.GetString())
                         , _u8L("See Download page.")
-                        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_web_page_localized("https://www.prusa3d.com/slicerweb"); return true; }
+                        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_web_page_localized(SLIC3R_DOWNLOAD); return true; }
                     );
                 //}
             }
@@ -1274,7 +1277,7 @@ bool GUI_App::on_init_inner()
                         , NotificationManager::NotificationLevel::ImportantNotificationLevel
                         , Slic3r::format(_u8L("New prerelease version %1% is available."), evt_string)
                         , _u8L("See Releases page.")
-                        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_browser_with_warning_dialog("https://github.com/prusa3d/PrusaSlicer/releases"); return true; }
+                        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_browser_with_warning_dialog("https://github.com/" SLIC3R_GITHUB "/releases"); return true; }
                     );
     }
             }
@@ -2157,15 +2160,17 @@ static const wxLanguageInfo* linux_get_existing_locale_language(const wxLanguage
                                  }),
                    locales.end());
 
-    // Is there a candidate matching a country code of a system language? Move it to the end,
-    // while maintaining the order of matches, so that the best match ends up at the very end.
-    std::string system_country = "_" + into_u8(system_language->CanonicalName.AfterFirst('_')).substr(0, 2);
-    int cnt = locales.size();
-    for (int i=0; i<cnt; ++i)
-        if (locales[i].find(system_country) != std::string::npos) {
-            locales.emplace_back(std::move(locales[i]));
-            locales[i].clear();
-        }
+    if (system_language) {
+        // Is there a candidate matching a country code of a system language? Move it to the end,
+        // while maintaining the order of matches, so that the best match ends up at the very end.
+        std::string system_country = "_" + into_u8(system_language->CanonicalName.AfterFirst('_')).substr(0, 2);
+        int cnt = locales.size();
+        for (int i=0; i<cnt; ++i)
+            if (locales[i].find(system_country) != std::string::npos) {
+                locales.emplace_back(std::move(locales[i]));
+                locales[i].clear();
+            }
+    }
 
     // Now try them one by one.
     for (auto it = locales.rbegin(); it != locales.rend(); ++ it)
@@ -2452,7 +2457,7 @@ void GUI_App::update_mode()
 void GUI_App::add_config_menu(wxMenuBar *menu)
 {
     auto local_menu = new wxMenu();
-    wxWindowID config_id_base = wxWindow::NewControlId(int(ConfigMenuCnt + Slic3r::GUI::get_app_config()->tags().size()));
+    wxWindowID config_id_base = wxWindow::NewControlId(int(ConfigMenuCnt + Slic3r::GUI::get_app_config()->tags().size()*2));
 
     const auto config_wizard_name = _(ConfigWizard::name(true));
     const auto config_wizard_tooltip = from_u8((boost::format(_utf8(L("Run %s"))) % config_wizard_name).str());
@@ -2476,6 +2481,7 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
 #endif
         _L("Application preferences"));
     wxMenu* mode_menu = nullptr;
+    wxMenu* tag_menu = nullptr;
     if (is_editor()) {
         local_menu->AppendSeparator();
         mode_menu = new wxMenu();
@@ -2487,6 +2493,15 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
         }
 
         local_menu->AppendSubMenu(mode_menu, _L("Mode"), wxString::Format(_L("%s View Mode"), SLIC3R_APP_NAME));
+
+        tag_menu = new wxMenu();
+        for (const AppConfig::Tag& tag : Slic3r::GUI::get_app_config()->tags()) {
+            tag_menu->AppendCheckItem(config_id_base + ConfigMenuCnt + config_menu_idx, _(tag.name), _(tag.description));
+            Bind(wxEVT_UPDATE_UI, [this, tag](wxUpdateUIEvent& evt) { evt.Check((get_mode() & tag.tag) != 0); }, config_id_base + ConfigMenuCnt + config_menu_idx);
+            config_menu_idx++;
+        }
+
+        local_menu->AppendSubMenu(tag_menu, _L("Tags"), wxString::Format(_L("%s View Mode"), SLIC3R_APP_NAME));
     }
     local_menu->AppendSeparator();
     local_menu->Append(config_id_base + ConfigMenuLanguage, _L("&Language"));
@@ -2632,11 +2647,18 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
     using std::placeholders::_1;
 
     if (mode_menu != nullptr) {
-        auto modfn = [this](ConfigOptionMode mode, wxCommandEvent&) { if (get_mode() != mode) save_mode(get_mode() ^ mode); };
+        auto modefn = [this](ConfigOptionMode mode, wxCommandEvent&) { if (get_mode() != mode) save_mode(mode); };
         int config_menu_idx = 0;
         for (const AppConfig::Tag& tag : Slic3r::GUI::get_app_config()->tags()) {
-            mode_menu->Bind(wxEVT_MENU, std::bind(modfn, tag.tag, _1), config_id_base + ConfigMenuCnt + config_menu_idx);
+            mode_menu->Bind(wxEVT_MENU, std::bind(modefn, tag.tag, _1), config_id_base + ConfigMenuCnt + config_menu_idx);
             config_menu_idx++;
+        }
+        if (tag_menu != nullptr) {
+            auto tagfn = [this](ConfigOptionMode mode, wxCommandEvent&) { if (get_mode() != mode) save_mode(get_mode() ^ mode); };
+            for (const AppConfig::Tag& tag : Slic3r::GUI::get_app_config()->tags()) {
+                tag_menu->Bind(wxEVT_MENU, std::bind(tagfn, tag.tag, _1), config_id_base + ConfigMenuCnt + config_menu_idx);
+                config_menu_idx++;
+            }
         }
         //mode_menu->Bind(wxEVT_MENU, std::bind(modfn, comSimple, _1), config_id_base + ConfigMenuModeSimple);
         //mode_menu->Bind(wxEVT_MENU, std::bind(modfn, comAdvanced, _1), config_id_base + ConfigMenuModeAdvanced);

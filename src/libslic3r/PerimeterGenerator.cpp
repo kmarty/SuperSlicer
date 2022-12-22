@@ -24,7 +24,18 @@
 #include <boost/log/trivial.hpp>
 
 namespace Slic3r {
-
+#if _DEBUG
+struct LoopAssertVisitor : public ExtrusionVisitorRecursiveConst {
+    virtual void default_use(const ExtrusionEntity& entity) override {};
+    virtual void use(const ExtrusionLoop& loop) override {
+        for (auto it = std::next(loop.paths.begin()); it != loop.paths.end(); ++it) {
+            assert(it->polyline.points.size() >= 2);
+            assert(std::prev(it)->polyline.last_point() == it->polyline.first_point());
+        }
+        assert(loop.paths.front().first_point() == loop.paths.back().last_point());
+    }
+};
+#endif
 PerimeterGeneratorLoops get_all_Childs(PerimeterGeneratorLoop loop) {
     PerimeterGeneratorLoops ret;
     for (PerimeterGeneratorLoop &child : loop.children) {
@@ -435,6 +446,9 @@ void PerimeterGenerator::process()
                 if (unmillable.empty())
                     last = offset_ex(last, mill_extra_size);
                 else {
+                //FIXME only work if mill_extra_size < mill_nozzle/2 (becasue it's the extra offset from unmillable)
+                //FIXME overhangs if mill_extra_size is too big
+                //FIXME merge with process_arachne?
                     ExPolygons growth = diff_ex(offset_ex(last, mill_extra_size), unmillable, ApplySafetyOffset::Yes);
                     last.insert(last.end(), growth.begin(), growth.end());
                     last = union_ex(last);
@@ -514,9 +528,17 @@ void PerimeterGenerator::process()
                 }
 
                 // allow this perimeter to overlap itself?
-                float thin_perimeter = perimeter_idx == 0 ? this->config->thin_perimeters.get_abs_value(1) : (this->config->thin_perimeters.get_abs_value(1)==0 ? 0 : this->config->thin_perimeters_all.get_abs_value(1));
-                if (thin_perimeter < 0.02) // can create artifacts
+                float thin_perimeter = this->config->thin_perimeters.get_abs_value(1);
+                if (perimeter_idx > 0 && thin_perimeter != 0) {
+                    thin_perimeter = this->config->thin_perimeters_all.get_abs_value(1);
+                }
+                bool allow_perimeter_anti_hysteresis = thin_perimeter >= 0;
+                if (thin_perimeter < 0) {
+                    thin_perimeter = -thin_perimeter;
+                }
+                if (thin_perimeter < 0.02) { // can create artifacts
                     thin_perimeter = 0;
+                }
 
                 // Calculate next onion shell of perimeters.
                 //this variable stored the next onion
@@ -525,13 +547,13 @@ void PerimeterGenerator::process()
                     // compute next onion
                         // the minimum thickness of a single loop is:
                         // ext_width/2 + ext_spacing/2 + spacing/2 + width/2
-                    if (thin_perimeter > 0.98)
+                    if (thin_perimeter > 0.98) {
                         next_onion = offset_ex(
                             last,
                             -(float)(ext_perimeter_width / 2),
                             ClipperLib::JoinType::jtMiter,
                             3);
-                    else if (thin_perimeter > 0.01) {
+                    } else if (thin_perimeter > 0.01) {
                         next_onion = offset2_ex(
                             last,
                             -(float)(ext_perimeter_width / 2 + (1 - thin_perimeter) * ext_perimeter_spacing / 2 - 1),
@@ -560,19 +582,21 @@ void PerimeterGenerator::process()
                     // look for thin walls
                     if (this->config->thin_walls) {
                         // detect edge case where a curve can be split in multiple small chunks.
-                        std::vector<float> divs = { 2.1f, 1.9f, 2.2f, 1.75f, 1.5f }; //don't go too far, it's not possible to print thin wall after that
-                        size_t idx_div = 0;
-                        while (next_onion.size() > last.size() && idx_div < divs.size()) {
-                            float div = divs[idx_div];
-                            //use a sightly bigger spacing to try to drastically improve the split, that can lead to very thick gapfill
-                            ExPolygons next_onion_secondTry = offset2_ex(
-                                last,
-                                -(float)((ext_perimeter_width / 2) + (ext_perimeter_spacing / div) - 1),
-                                +(float)((ext_perimeter_spacing / div) - 1));
-                            if (next_onion.size() > next_onion_secondTry.size() * 1.2 && next_onion.size() > next_onion_secondTry.size() + 2) {
-                                next_onion = next_onion_secondTry;
+                        if (allow_perimeter_anti_hysteresis) {
+                            std::vector<float> divs = { 2.1f, 1.9f, 2.2f, 1.75f, 1.5f }; //don't go too far, it's not possible to print thin wall after that
+                            size_t idx_div = 0;
+                            while (next_onion.size() > last.size() && idx_div < divs.size()) {
+                                float div = divs[idx_div];
+                                //use a sightly bigger spacing to try to drastically improve the split, that can lead to very thick gapfill
+                                ExPolygons next_onion_secondTry = offset2_ex(
+                                    last,
+                                    -(float)((ext_perimeter_width / 2) + (ext_perimeter_spacing / div) - 1),
+                                    +(float)((ext_perimeter_spacing / div) - 1));
+                                if (next_onion.size() > next_onion_secondTry.size() * 1.2 && next_onion.size() > next_onion_secondTry.size() + 2) {
+                                    next_onion = next_onion_secondTry;
+                                }
+                                idx_div++;
                             }
-                            idx_div++;
                         }
 
                         // the following offset2 ensures almost nothing in @thin_walls is narrower than $min_width
@@ -674,46 +698,47 @@ void PerimeterGenerator::process()
                             +(float)((1 - thin_perimeter) * perimeter_spacing / 2 - 1),
                             (round_peri ? ClipperLib::JoinType::jtRound : ClipperLib::JoinType::jtMiter),
                             (round_peri ? min_round_spacing : 3));
-                        // now try with different min spacing if we fear some hysteresis
-                        //TODO, do that for each polygon from last, instead to do for all of them in one go.
-                        ExPolygons no_thin_onion = offset_ex(last, double(-good_spacing));
-                        if (last_area < 0) {
-                            last_area = 0;
-                            for (const ExPolygon& expoly : last) {
-                                last_area += expoly.area();
-                            }
-                        }
-                        double new_area = 0;
-                        for (const ExPolygon& expoly : next_onion) {
-                            new_area += expoly.area();
-                        }
-
-                        std::vector<float> divs{ 1.8f, 1.6f }; //don't over-extrude, so don't use divider >2
-                        size_t idx_div = 0;
-                        while ((next_onion.size() > no_thin_onion.size() || (new_area != 0 && last_area > new_area * 100)) && idx_div < divs.size()) {
-                            float div = divs[idx_div];
-                            //use a sightly bigger spacing to try to drastically improve the split, that can lead to very thick gapfill
-                            ExPolygons next_onion_secondTry = offset2_ex(
-                                last,
-                                -(float)(good_spacing + (1 - thin_perimeter) * (perimeter_spacing / div) - 1),
-                                +(float)((1 - thin_perimeter) * (perimeter_spacing / div) - 1));
-                            if (next_onion.size() > next_onion_secondTry.size() * 1.2 && next_onion.size() > next_onion_secondTry.size() + 2) {
-                                // don't get it if it creates too many
-                                next_onion = next_onion_secondTry;
-                            } else if (next_onion.size() > next_onion_secondTry.size() || last_area > new_area * 100) {
-                                // don't get it if it's too small
-                                double area_new = 0;
-                                for (const ExPolygon& expoly : next_onion_secondTry) {
-                                    area_new += expoly.area();
+                        if (allow_perimeter_anti_hysteresis) {
+                            // now try with different min spacing if we fear some hysteresis
+                            //TODO, do that for each polygon from last, instead to do for all of them in one go.
+                            ExPolygons no_thin_onion = offset_ex(last, double(-good_spacing));
+                            if (last_area < 0) {
+                                last_area = 0;
+                                for (const ExPolygon& expoly : last) {
+                                    last_area += expoly.area();
                                 }
-                                if (last_area > area_new * 100 || new_area == 0) {
+                            }
+                            double new_area = 0;
+                            for (const ExPolygon& expoly : next_onion) {
+                                new_area += expoly.area();
+                            }
+
+                            std::vector<float> divs{ 1.8f, 1.6f }; //don't over-extrude, so don't use divider >2
+                            size_t idx_div = 0;
+                            while ((next_onion.size() > no_thin_onion.size() || (new_area != 0 && last_area > new_area * 100)) && idx_div < divs.size()) {
+                                float div = divs[idx_div];
+                                //use a sightly bigger spacing to try to drastically improve the split, that can lead to very thick gapfill
+                                ExPolygons next_onion_secondTry = offset2_ex(
+                                    last,
+                                    -(float)(good_spacing + (1 - thin_perimeter) * (perimeter_spacing / div) - 1),
+                                    +(float)((1 - thin_perimeter) * (perimeter_spacing / div) - 1));
+                                if (next_onion.size() > next_onion_secondTry.size() * 1.2 && next_onion.size() > next_onion_secondTry.size() + 2) {
+                                    // don't get it if it creates too many
                                     next_onion = next_onion_secondTry;
+                                } else if (next_onion.size() > next_onion_secondTry.size() || last_area > new_area * 100) {
+                                    // don't get it if it's too small
+                                    double area_new = 0;
+                                    for (const ExPolygon& expoly : next_onion_secondTry) {
+                                        area_new += expoly.area();
+                                    }
+                                    if (last_area > area_new * 100 || new_area == 0) {
+                                        next_onion = next_onion_secondTry;
+                                    }
                                 }
+                                idx_div++;
                             }
-                            idx_div++;
+                            last_area = new_area;
                         }
-                        last_area = new_area;
-
                     } else {
                         // If "overlapping_perimeters" is enabled, this paths will be entered, which 
                         // leads to overflows, as in prusa3d/Slic3r GH #32
@@ -932,7 +957,7 @@ void PerimeterGenerator::process()
                                 contours.emplace_back();
                                 holes.emplace_back();
                             }
-                            //Add the new periemter
+                        //Add the new perimeter
                             contours[contours_size].emplace_back(contour_expolygon.front().contour, contours_size, true, has_steep_overhang, fuzzify_gapfill);
                             //create the new gapfills
                             ExPolygons gapfill_area = offset_ex(Polygons{ expoly.contour }, -(float)(perimeter_spacing));
@@ -1037,6 +1062,9 @@ void PerimeterGenerator::process()
                     peri_entities = this->_traverse_loops(contours.front(), thin_walls_thickpolys);
                 }
             }
+#if _DEBUG
+        peri_entities.visit(LoopAssertVisitor{});
+#endif
             //{
             //    static int aodfjiaqsdz = 0;
             //    std::stringstream stri;
@@ -1121,6 +1149,9 @@ void PerimeterGenerator::process()
                 this->loops->append(peri_entities);
             }
         } // for each loop of an island
+#if _DEBUG
+    this->loops->visit(LoopAssertVisitor{});
+#endif
 
         // fill gaps
         ExPolygons gaps_ex;
@@ -1769,7 +1800,27 @@ void PerimeterGenerator::_merge_thin_walls(ExtrusionEntityCollection &extrusions
     public:
         float percent_extrusion;
         std::vector<ExtrusionPath> paths;
+        Point* first_point = nullptr;
+        coordf_t resolution_sqr;
         virtual void use(ExtrusionPath &path) override {
+            //ensure the loop is continue.
+            if (first_point != nullptr) {
+                if (*first_point != path.first_point()) {
+                    if (first_point->distance_to_square(path.first_point()) < resolution_sqr) {
+                        path.polyline.points[0] = *first_point;
+                    } else {
+                        //add travel
+                        ExtrusionPath travel(path.role());
+                        travel.width = path.width;
+                        travel.height = path.height;
+                        travel.mm3_per_mm = 0;
+                        travel.polyline.points.push_back(*first_point);
+                        travel.polyline.points.push_back(path.first_point());
+                        paths.push_back(travel);
+                    }
+                }
+                first_point = nullptr;
+            }
             path.mm3_per_mm *= percent_extrusion;
             path.width *= percent_extrusion;
             paths.push_back(path);
@@ -1870,6 +1921,9 @@ void PerimeterGenerator::_merge_thin_walls(ExtrusionEntityCollection &extrusions
         //now insert thin wall if it has a point
         //it found a segment
         if (searcher.search_result.path != nullptr) {
+#if _DEBUG
+            searcher.search_result.loop->visit(LoopAssertVisitor{});
+#endif
             if (!searcher.search_result.from_start)
                 tw.reverse();
             //get the point
@@ -1890,20 +1944,25 @@ void PerimeterGenerator::_merge_thin_walls(ExtrusionEntityCollection &extrusions
             //create thin wall path exttrusion
             ExtrusionEntityCollection tws;
             tws.append(Geometry::thin_variable_width({ tw }, erThinWall, this->ext_perimeter_flow, std::max(ext_perimeter_flow.scaled_width() / 4, scale_t(this->print_config->resolution))));
+            assert(!tws.entities().empty());
             ChangeFlow change_flow;
             if (tws.entities().size() == 1 && tws.entities()[0]->is_loop()) {
                 //loop, just add it 
+                change_flow.first_point = &point;
                 change_flow.percent_extrusion = 1;
                 change_flow.use(tws);
                 //add move back
-
                 searcher.search_result.loop->paths.insert(searcher.search_result.loop->paths.begin() + 1 + searcher.search_result.idx_path,
                     change_flow.paths.begin(), change_flow.paths.end());
                 //add move to
 
+#if _DEBUG
+                searcher.search_result.loop->visit(LoopAssertVisitor{});
+#endif
             } else {
                 //first add the return path
                 //ExtrusionEntityCollection tws_second = tws; // this does a deep copy
+                change_flow.first_point = &point;
                 change_flow.percent_extrusion = 0.1f;
                 change_flow.use(tws); // tws_second); //does not need the deep copy if the change_flow copy the content instead of re-using it.
                 //force reverse
@@ -1914,11 +1973,15 @@ void PerimeterGenerator::_merge_thin_walls(ExtrusionEntityCollection &extrusions
                 searcher.search_result.loop->paths.insert(searcher.search_result.loop->paths.begin() + 1 + searcher.search_result.idx_path,
                     change_flow.paths.begin(), change_flow.paths.end());
                 //add the real extrusion path
+                change_flow.first_point = &point;
                 change_flow.percent_extrusion = 9.f; // 0.9 but as we modified it by 0.1 just before, has to multiply by 10
                 change_flow.paths = std::vector<ExtrusionPath>();
                 change_flow.use(tws);
                 searcher.search_result.loop->paths.insert(searcher.search_result.loop->paths.begin() + 1 + searcher.search_result.idx_path,
                     change_flow.paths.begin(), change_flow.paths.end());
+#if _DEBUG
+                searcher.search_result.loop->visit(LoopAssertVisitor{});
+#endif
             }
         } else {
             not_added.push_back(tw);
@@ -1943,7 +2006,7 @@ PerimeterGenerator::_get_nearest_point(const PerimeterGeneratorLoops &children, 
             if (myPolylines.paths[idx_poly].length() < dist_cut + perimeter_flow.scaled_width()/20) continue;
 
             if ((myPolylines.paths[idx_poly].role() == erExternalPerimeter || child.is_external() )
-                && this->object_config->seam_position.value != SeamPosition::spRandom) {
+                && (this->object_config->seam_position.value != SeamPosition::spRandom && this->object_config->seam_position.value != SeamPosition::spAllRandom)) {
                 //first, try to find 2 point near enough
                 for (size_t idx_point = 0; idx_point < myPolylines.paths[idx_poly].polyline.points.size(); idx_point++) {
                     const Point &p = myPolylines.paths[idx_poly].polyline.points[idx_point];

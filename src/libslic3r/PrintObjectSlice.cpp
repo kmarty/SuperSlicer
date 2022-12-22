@@ -502,7 +502,8 @@ std::string fix_slicing_errors(LayerPtrs &layers, const std::function<void()> &t
     while (! layers.empty() && (layers.front()->lslices.empty() || layers.front()->empty())) {
         delete layers.front();
         layers.erase(layers.begin());
-        layers.front()->lower_layer = nullptr;
+        if(!layers.empty())
+            layers.front()->lower_layer = nullptr;
         for (size_t i = 0; i < layers.size(); ++ i)
             layers[i]->set_id(layers[i]->id() - 1);
     }
@@ -526,11 +527,11 @@ void PrintObject::slice()
         return;
     m_print->set_status(0, L("Processing triangulated mesh"));
     std::vector<coordf_t> layer_height_profile;
-    this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile);
+    this->update_layer_height_profile(*this->model_object(), *m_slicing_params, layer_height_profile);
     m_print->throw_if_canceled();
     m_typed_slices = false;
     this->clear_layers();
-    m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile));
+    m_layers = new_layers(this, generate_object_layers(*m_slicing_params, layer_height_profile));
     this->slice_volumes();
     m_print->throw_if_canceled();
     // Fix the model.
@@ -697,6 +698,7 @@ ExPolygons PrintObject::_shrink_contour_holes(double contour_delta, double not_c
         Polygons contours;
         ExPolygons holes;
         for (const Polygon& hole : ex_poly.holes) {
+            assert(hole.points.size() >= 3);
             //check if convex to reduce it
             // check whether first point forms a convex angle
             //note: we allow a deviation of 5.7° (0.01rad = 0.57°)
